@@ -10,12 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -325,40 +323,6 @@ def validate_novel_features(cli_dir: Path, manifest: dict | None) -> list[Proble
     return problems
 
 
-def candidate_patch_marker_files(cli_dir: Path) -> Iterable[Path]:
-    skip_parts = {".git", ".manuscripts"}
-    skip_names = {".printing-press-patches.json"}
-    for path in cli_dir.rglob("*"):
-        if not path.is_file() or path.name in skip_names:
-            continue
-        if skip_parts.intersection(path.relative_to(cli_dir).parts):
-            continue
-        if path.suffix == ".go":
-            yield path
-
-
-# Matches the inline marker convention documented in each printed CLI's
-# AGENTS.md:
-#
-#     // PATCH: <one-line summary>
-#     // PATCH(upstream cli-printing-press#<n>): ...
-#
-# Anchored on the `// PATCH` comment prefix immediately followed by `:` or `(`
-# — exactly the two documented forms. Intentionally excludes bare HTTP method
-# literals like "PATCH" that appear in generated client/handler code
-# (case "PATCH":, makeAPIHandler("PATCH", ...), {"pp:method": "PATCH"}, etc.),
-# which are not hand-authored customizations and would otherwise false-positive
-# on any printed CLI for an API that exposes HTTP PATCH endpoints.
-_PATCH_MARKER_RE = re.compile(r"//\s*PATCH\s*[:(]")
-
-
-def has_patch_marker(path: Path) -> bool:
-    try:
-        return bool(_PATCH_MARKER_RE.search(path.read_text(errors="ignore")))
-    except OSError:
-        return False
-
-
 def validate_patch_manifest(cli_dir: Path) -> list[Problem]:
     problems: list[Problem] = []
     patch_path = cli_dir / ".printing-press-patches.json"
@@ -376,15 +340,6 @@ def validate_patch_manifest(cli_dir: Path) -> list[Problem]:
         problems.append(Problem(patch_path, "patches must be an array"))
         return problems
 
-    source_markers = [path for path in candidate_patch_marker_files(cli_dir) if has_patch_marker(path)]
-    if source_markers and not patches:
-        problems.append(
-            Problem(
-                patch_path,
-                "source files contain PATCH markers but patches[] is empty. Record the customization so regen reviewers can preserve it.",
-            )
-        )
-
     for idx, patch in enumerate(patches, start=1):
         if not isinstance(patch, dict):
             problems.append(Problem(patch_path, f"patches[{idx}] must be an object"))
@@ -395,13 +350,11 @@ def validate_patch_manifest(cli_dir: Path) -> list[Problem]:
             problems.append(Problem(patch_path, f"patches[{idx}] must list one or more files"))
             continue
 
-        referenced_files: list[Path] = []
         for file_name in files:
             if not isinstance(file_name, str) or not file_name:
                 problems.append(Problem(patch_path, f"patches[{idx}] has an invalid file entry {file_name!r}"))
                 continue
             file_path = cli_dir / file_name
-            referenced_files.append(file_path)
             if not file_path.exists():
                 problems.append(
                     Problem(
@@ -409,14 +362,6 @@ def validate_patch_manifest(cli_dir: Path) -> list[Problem]:
                         f"patch entry references {file_name}, but that file does not exist in the published CLI package.",
                     )
                 )
-
-        if referenced_files and not any(path.exists() and has_patch_marker(path) for path in referenced_files):
-            problems.append(
-                Problem(
-                    patch_path,
-                    f"patches[{idx}] does not point at a file containing a PATCH marker.",
-                )
-            )
 
     return problems
 

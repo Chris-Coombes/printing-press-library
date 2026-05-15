@@ -177,71 +177,55 @@ class PublishPackageVerifierTest(unittest.TestCase):
         self.assertFalse(any("-pp-cli/-pp-mcp binary suffix" in msg for msg in messages))
 
 
-class HasPatchMarkerTest(unittest.TestCase):
-    """Unit tests for ``has_patch_marker`` to ensure only the documented
-    ``// PATCH:`` / ``// PATCH(...)`` comment convention is detected, not bare
-    HTTP method literals or other coincidental occurrences of the word.
+class ValidatePatchManifestTest(unittest.TestCase):
+    """Validate that .printing-press-patches.json structural checks still
+    fire (every patches[] entry must be an object with a non-empty
+    `files` list referencing files that exist). The previous
+    `// PATCH` source-marker requirement was removed — the manifest
+    itself is the audit record; an in-source marker was redundant.
     """
 
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="has-patch-marker-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="validate-patch-manifest-"))
         self.addCleanup(lambda: shutil.rmtree(self.tmp))
 
-    def _write(self, name: str, body: str) -> Path:
-        path = self.tmp / name
-        path.write_text(body)
-        return path
+    def _cli_dir(self, name: str) -> Path:
+        cli = self.tmp / name
+        cli.mkdir()
+        return cli
 
-    def test_detects_real_patch_marker(self) -> None:
-        path = self._write(
-            "real.go",
-            "// PATCH: align response envelope with upstream\nfunc foo() {}\n",
+    def test_passes_when_files_exist_regardless_of_markers(self) -> None:
+        # The PATCH-marker check is gone: a patches[] entry with valid
+        # files that exist passes even when no file carries any `// PATCH`
+        # comment. The manifest entry is itself the audit record.
+        cli = self._cli_dir("no-markers")
+        (cli / "foo.go").write_text("package foo\n// no marker here\n")
+        (cli / "spec.json").write_text('{"x": 1}\n')
+        (cli / ".printing-press-patches.json").write_text(
+            '{"patches": [{"id": "mixed", "files": ["foo.go", "spec.json"]}]}\n'
         )
-        self.assertTrue(verifier.has_patch_marker(path))
+        problems = verifier.validate_patch_manifest(cli)
+        self.assertEqual(problems, [])
 
-    def test_detects_patch_marker_with_upstream_ref(self) -> None:
-        path = self._write(
-            "real.go",
-            "    // PATCH(upstream cli-printing-press#842): auto-fill AccountSid\n",
+    def test_fails_when_referenced_file_missing(self) -> None:
+        # Structural check still applies: referenced files must exist.
+        cli = self._cli_dir("missing-file")
+        (cli / ".printing-press-patches.json").write_text(
+            '{"patches": [{"id": "vanished", "files": ["nope.go"]}]}\n'
         )
-        self.assertTrue(verifier.has_patch_marker(path))
+        problems = verifier.validate_patch_manifest(cli)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("does not exist", problems[0].message)
 
-    def test_ignores_http_method_string_literal(self) -> None:
-        path = self._write(
-            "client.go",
-            'return c.do("PATCH", path, nil, body, nil)\n',
+    def test_fails_on_empty_files_list(self) -> None:
+        cli = self._cli_dir("empty-files")
+        (cli / ".printing-press-patches.json").write_text(
+            '{"patches": [{"id": "empty", "files": []}]}\n'
         )
-        self.assertFalse(verifier.has_patch_marker(path))
+        problems = verifier.validate_patch_manifest(cli)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("must list one or more files", problems[0].message)
 
-    def test_ignores_makeAPIHandler_PATCH(self) -> None:
-        path = self._write(
-            "tools.go",
-            'makeAPIHandler("PATCH", "/conversations/{id}", bindings, positional)\n',
-        )
-        self.assertFalse(verifier.has_patch_marker(path))
-
-    def test_ignores_switch_case_PATCH(self) -> None:
-        path = self._write(
-            "tools.go",
-            'switch method {\ncase "POST", "PUT", "PATCH":\n    return body\n}\n',
-        )
-        self.assertFalse(verifier.has_patch_marker(path))
-
-    def test_ignores_annotation_map_value(self) -> None:
-        path = self._write(
-            "cmd.go",
-            'Annotations: map[string]string{"pp:method": "PATCH", "pp:path": "/x"},\n',
-        )
-        self.assertFalse(verifier.has_patch_marker(path))
-
-    def test_ignores_word_PATCH_in_string_or_comment(self) -> None:
-        path = self._write(
-            "doc.go",
-            "// This handler issues HTTP PATCH requests against the upstream API.\n",
-        )
-        # Plain prose comment without the colon/paren marker shape is not a
-        # customization marker.
-        self.assertFalse(verifier.has_patch_marker(path))
 
 
 if __name__ == "__main__":
